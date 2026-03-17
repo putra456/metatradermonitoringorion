@@ -1,0 +1,1585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PutraDev Trading Monitor</title>
+    <link rel="stylesheet" href="/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+    <!-- Background Effects -->
+    <div class="bg-grid"></div>
+    <div class="bg-glow bg-glow-1"></div>
+    <div class="bg-glow bg-glow-2"></div>
+    <div class="bg-glow bg-glow-3"></div>
+
+    <!-- Watermarks -->
+    <div class="watermark">PutraDev – Don't Steal</div>
+    <div class="watermark-center">PutraDev</div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- App Root -->
+    <div id="app"></div>
+
+    <script>
+    /**
+     * ╔══════════════════════════════════════════════════════════════╗
+     * ║              PutraDev Trading Monitor Platform               ║
+     * ║                  Frontend Application                        ║
+     * ║                                                              ║
+     * ║  © 2026 PutraDev. All rights reserved.                       ║
+     * ║  PutraDev – Don't Steal                                      ║
+     * ╚══════════════════════════════════════════════════════════════╝
+     */
+
+    // ─── State Management ────────────────────────────────────
+    const State = {
+        user: null,
+        token: null,
+        currentPage: 'dashboard',
+        accounts: [],
+        selectedAccount: null,
+        positions: [],
+        history: [],
+        analytics: null,
+        overview: null,
+        ws: null,
+        charts: {},
+        refreshInterval: null,
+        systemInfo: null,
+        telegramStatus: null,
+        users: []
+    };
+
+    // ─── API Client ──────────────────────────────────────────
+    const API = {
+        baseUrl: '',
+
+        async request(method, endpoint, body = null) {
+            const headers = { 'Content-Type': 'application/json' };
+            if (State.token) headers['Authorization'] = `Bearer ${State.token}`;
+
+            const opts = { method, headers };
+            if (body) opts.body = JSON.stringify(body);
+
+            try {
+                const res = await fetch(`${this.baseUrl}${endpoint}`, opts);
+                if (res.status === 401) {
+                    State.token = null;
+                    State.user = null;
+                    localStorage.removeItem('putradev_token');
+                    renderApp();
+                    return null;
+                }
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || 'Request failed');
+                return data;
+            } catch (e) {
+                console.error(`API Error: ${endpoint}`, e);
+                showToast(e.message, 'error');
+                throw e;
+            }
+        },
+
+        get(ep) { return this.request('GET', ep); },
+        post(ep, body) { return this.request('POST', ep, body); },
+        del(ep) { return this.request('DELETE', ep); },
+
+        // Auth
+        login(u, p) { return this.post('/api/auth/login', { username: u, password: p }); },
+        register(u, p, plan) { return this.post('/api/auth/register', { username: u, password: p, plan }); },
+        me() { return this.get('/api/auth/me'); },
+
+        // Accounts
+        getAccounts() { return this.get('/api/accounts'); },
+        getAccount(id) { return this.get(`/api/accounts/${id}`); },
+        addAccount(data) { return this.post('/api/accounts/add', data); },
+        deleteAccount(id) { return this.del(`/api/accounts/${id}`); },
+        reconnect(id) { return this.post(`/api/accounts/${id}/reconnect`); },
+
+        // Positions & History
+        getPositions(id) { return this.get(`/api/accounts/${id}/positions`); },
+        getHistory(id, days=90) { return this.get(`/api/accounts/${id}/history?days=${days}`); },
+
+        // Analytics
+        getAnalytics(id) { return this.get(`/api/accounts/${id}/analytics`); },
+        getOverview() { return this.get('/api/analytics/overview'); },
+
+        // Charts
+        getCandles(sym, tf, cnt) { return this.get(`/api/charts/candles?symbol=${sym}&timeframe=${tf}&count=${cnt}`); },
+        getSymbols() { return this.get('/api/charts/symbols'); },
+
+        // Admin
+        getUsers() { return this.get('/api/admin/users'); },
+        updatePlan(u, p) { return this.post('/api/admin/users/plan', { username: u, plan: p }); },
+        configureTelegram(t) { return this.post('/api/admin/telegram/configure', { bot_token: t }); },
+        getTelegramStatus() { return this.get('/api/admin/telegram/status'); },
+        getSystemInfo() { return this.get('/api/admin/system'); }
+    };
+
+    // ─── Toast Notifications ─────────────────────────────────
+    function showToast(message, type = 'info') {
+        const container = document.getElementById('toastContainer');
+        const toast = document.createElement('div');
+        const icons = { success: 'fa-check-circle', error: 'fa-exclamation-circle', warning: 'fa-exclamation-triangle', info: 'fa-info-circle' };
+        toast.className = `toast toast-${type}`;
+        toast.innerHTML = `<i class="fas ${icons[type] || icons.info}"></i><span class="toast-message">${message}</span>`;
+        container.appendChild(toast);
+        setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translateX(100px)'; setTimeout(() => toast.remove(), 300); }, 4000);
+    }
+
+    // ─── Format Helpers ──────────────────────────────────────
+    function formatCurrency(v, d = 2) {
+        if (v == null || isNaN(v)) return '$0.00';
+        return '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+    }
+
+    function formatPct(v) { return (v != null ? Number(v).toFixed(2) : '0.00') + '%'; }
+
+    function formatDuration(s) {
+        if (!s || s < 60) return `${Math.floor(s || 0)}s`;
+        if (s < 3600) return `${Math.floor(s/60)}m ${Math.floor(s%60)}s`;
+        if (s < 86400) return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+        return `${Math.floor(s/86400)}d ${Math.floor((s%86400)/3600)}h`;
+    }
+
+    function formatTime(iso) {
+        if (!iso) return '—';
+        const d = new Date(iso);
+        return d.toLocaleString('en-GB', { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function profitClass(v) { return v >= 0 ? 'profit-positive' : 'profit-negative'; }
+    function profitIcon(v) { return v >= 0 ? '▲' : '▼'; }
+
+    // ─── WebSocket ───────────────────────────────────────────
+    function connectWebSocket() {
+        if (State.ws) { try { State.ws.close(); } catch(e){} }
+        if (!State.token) return;
+
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        State.ws = new WebSocket(`${proto}://${location.host}/ws/${State.token}`);
+
+        State.ws.onopen = () => { console.log('WebSocket connected'); pingWs(); };
+        State.ws.onmessage = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                handleWsMessage(data);
+            } catch(err) { console.error('WS parse error', err); }
+        };
+        State.ws.onclose = () => { setTimeout(connectWebSocket, 5000); };
+        State.ws.onerror = () => {};
+    }
+
+    function pingWs() {
+        if (State.ws && State.ws.readyState === WebSocket.OPEN) {
+            State.ws.send(JSON.stringify({ type: 'ping' }));
+            setTimeout(pingWs, 30000);
+        }
+    }
+
+    function handleWsMessage(data) {
+        if (data.type === 'account_update' && State.selectedAccount && data.account_id === State.selectedAccount.id) {
+            if (data.info) updateLiveInfo(data.info);
+            if (data.positions) updateLivePositions(data.positions);
+        }
+    }
+
+    function updateLiveInfo(info) {
+        const els = {
+            'live-balance': formatCurrency(info.balance),
+            'live-equity': formatCurrency(info.equity),
+            'live-margin': formatCurrency(info.margin),
+            'live-free-margin': formatCurrency(info.free_margin),
+            'live-floating': formatCurrency(info.floating_pnl),
+            'live-leverage': `1:${info.leverage}`,
+            'live-drawdown': formatPct(info.drawdown_pct)
+        };
+        for (const [id, val] of Object.entries(els)) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = val;
+                if (id === 'live-floating') el.className = `stat-value ${info.floating_pnl >= 0 ? 'positive' : 'negative'}`;
+            }
+        }
+    }
+
+    function updateLivePositions(positions) {
+        State.positions = positions;
+        const container = document.getElementById('positions-table-body');
+        if (container) container.innerHTML = renderPositionsRows(positions);
+    }
+
+    // ─── Render Engine ───────────────────────────────────────
+    function renderApp() {
+        const app = document.getElementById('app');
+        if (!State.token) {
+            app.innerHTML = renderLoginPage();
+            return;
+        }
+        app.innerHTML = renderDashboardLayout();
+        navigateTo(State.currentPage);
+    }
+
+    // ─── Login Page ──────────────────────────────────────────
+    function renderLoginPage() {
+        return `
+        <div class="login-container">
+            <div class="login-card">
+                <div class="login-logo">
+                    <h1>⚡ PutraDev</h1>
+                    <p>Professional Trading Monitor</p>
+                </div>
+                <div id="login-form">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" class="form-input" id="login-username" placeholder="Enter username" autocomplete="username">
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" class="form-input" id="login-password" placeholder="Enter password" autocomplete="current-password">
+                    </div>
+                    <button class="btn btn-primary btn-full btn-lg" onclick="handleLogin()">
+                        <i class="fas fa-sign-in-alt"></i> Sign In
+                    </button>
+                    <div class="text-center mt-20">
+                        <span class="text-muted text-sm">Don't have an account? </span>
+                        <a href="javascript:void(0)" onclick="showRegister()" style="color:var(--accent-blue);text-decoration:none;font-weight:600;font-size:0.85rem;">Register</a>
+                    </div>
+                </div>
+                <div id="register-form" class="hidden">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" class="form-input" id="reg-username" placeholder="Choose username">
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" class="form-input" id="reg-password" placeholder="Choose password">
+                    </div>
+                    <button class="btn btn-success btn-full btn-lg" onclick="handleRegister()">
+                        <i class="fas fa-user-plus"></i> Create Account
+                    </button>
+                    <div class="text-center mt-20">
+                        <a href="javascript:void(0)" onclick="showLogin()" style="color:var(--accent-blue);text-decoration:none;font-weight:600;font-size:0.85rem;">Back to Login</a>
+                    </div>
+                </div>
+                <div class="text-center mt-24 text-muted text-sm">© 2026 PutraDev. All rights reserved.</div>
+            </div>
+        </div>`;
+    }
+
+    function showRegister() {
+        document.getElementById('login-form').classList.add('hidden');
+        document.getElementById('register-form').classList.remove('hidden');
+    }
+
+    function showLogin() {
+        document.getElementById('register-form').classList.add('hidden');
+        document.getElementById('login-form').classList.remove('hidden');
+    }
+
+    async function handleLogin() {
+        const u = document.getElementById('login-username').value.trim();
+        const p = document.getElementById('login-password').value;
+        if (!u || !p) return showToast('Enter username and password', 'warning');
+
+        try {
+            const data = await API.login(u, p);
+            State.token = data.token;
+            State.user = data.user;
+            localStorage.setItem('putradev_token', data.token);
+            showToast(`Welcome back, ${data.user.username}!`, 'success');
+            connectWebSocket();
+            renderApp();
+            loadDashboardData();
+        } catch (e) {
+            showToast('Login failed: ' + e.message, 'error');
+        }
+    }
+
+    async function handleRegister() {
+        const u = document.getElementById('reg-username').value.trim();
+        const p = document.getElementById('reg-password').value;
+        if (!u || !p) return showToast('Fill all fields', 'warning');
+        if (p.length < 4) return showToast('Password too short', 'warning');
+
+        try {
+            const data = await API.register(u, p, 'free');
+            State.token = data.token;
+            State.user = data.user;
+            localStorage.setItem('putradev_token', data.token);
+            showToast('Account created!', 'success');
+            connectWebSocket();
+            renderApp();
+        } catch (e) {
+            showToast('Registration failed: ' + e.message, 'error');
+        }
+    }
+
+    // ─── Dashboard Layout ────────────────────────────────────
+    function renderDashboardLayout() {
+        const isOwner = State.user && State.user.role === 'owner';
+        return `
+        <div class="app-container">
+            <!-- Sidebar -->
+            <nav class="sidebar" id="sidebar">
+                <div class="sidebar-brand">
+                    <div class="sidebar-brand-icon">P</div>
+                    <div class="sidebar-brand-text">
+                        <h2>PutraDev</h2>
+                        <span>Trading Monitor</span>
+                    </div>
+                </div>
+                <div class="sidebar-nav">
+                    <div class="sidebar-section-title">Main</div>
+                    <div class="nav-item active" data-page="dashboard" onclick="navigateTo('dashboard')">
+                        <i class="fas fa-th-large"></i> Dashboard
+                    </div>
+                    <div class="nav-item" data-page="accounts" onclick="navigateTo('accounts')">
+                        <i class="fas fa-wallet"></i> Accounts
+                    </div>
+                    <div class="nav-item" data-page="positions" onclick="navigateTo('positions')">
+                        <i class="fas fa-exchange-alt"></i> Open Positions
+                    </div>
+                    <div class="nav-item" data-page="history" onclick="navigateTo('history')">
+                        <i class="fas fa-history"></i> Trade History
+                    </div>
+
+                    <div class="sidebar-section-title">Analytics</div>
+                    <div class="nav-item" data-page="analytics" onclick="navigateTo('analytics')">
+                        <i class="fas fa-chart-line"></i> Analytics
+                    </div>
+                    <div class="nav-item" data-page="charts" onclick="navigateTo('charts')">
+                        <i class="fas fa-chart-bar"></i> Charts
+                    </div>
+
+                    ${isOwner ? `
+                    <div class="sidebar-section-title">Admin</div>
+                    <div class="nav-item" data-page="admin-users" onclick="navigateTo('admin-users')">
+                        <i class="fas fa-users-cog"></i> Users
+                    </div>
+                    <div class="nav-item" data-page="admin-telegram" onclick="navigateTo('admin-telegram')">
+                        <i class="fab fa-telegram"></i> Telegram Bot
+                    </div>
+                    <div class="nav-item" data-page="admin-system" onclick="navigateTo('admin-system')">
+                        <i class="fas fa-server"></i> System
+                    </div>
+                    ` : ''}
+                </div>
+                <div class="sidebar-footer">
+                    <div class="sidebar-user">
+                        <div class="sidebar-user-avatar">${State.user ? State.user.username[0].toUpperCase() : 'U'}</div>
+                        <div class="sidebar-user-info">
+                            <div class="sidebar-user-name">${State.user ? State.user.username : 'User'}</div>
+                            <div class="sidebar-user-role">${State.user ? State.user.role : ''} • ${State.user ? State.user.plan : ''}</div>
+                        </div>
+                        <button class="btn-icon btn-outline" onclick="handleLogout()" title="Logout">
+                            <i class="fas fa-sign-out-alt"></i>
+                        </button>
+                    </div>
+                </div>
+            </nav>
+
+            <!-- Main -->
+            <main class="main-content">
+                <div class="topbar">
+                    <div class="topbar-left">
+                        <button class="menu-toggle" onclick="toggleSidebar()"><i class="fas fa-bars"></i></button>
+                        <h1 class="topbar-title" id="page-title">Dashboard</h1>
+                    </div>
+                    <div class="topbar-right">
+                        <div class="topbar-status"><div class="dot"></div> Live</div>
+                        <button class="btn btn-sm btn-outline" onclick="refreshCurrentPage()"><i class="fas fa-sync-alt"></i></button>
+                    </div>
+                </div>
+                <div class="page-content" id="page-content">
+                    <div class="empty-state"><div class="skeleton skeleton-card w-full" style="height:200px"></div></div>
+                </div>
+                <footer class="footer">© 2026 PutraDev. All rights reserved. | PutraDev – Don't Steal</footer>
+            </main>
+        </div>`;
+    }
+
+    function toggleSidebar() {
+        document.getElementById('sidebar').classList.toggle('open');
+    }
+
+    function handleLogout() {
+        State.token = null;
+        State.user = null;
+        localStorage.removeItem('putradev_token');
+        if (State.ws) State.ws.close();
+        if (State.refreshInterval) clearInterval(State.refreshInterval);
+        showToast('Logged out', 'info');
+        renderApp();
+    }
+
+    // ─── Navigation ──────────────────────────────────────────
+    function navigateTo(page) {
+        State.currentPage = page;
+
+        // Update active nav
+        document.querySelectorAll('.nav-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.page === page);
+        });
+
+        const titles = {
+            'dashboard': 'Dashboard', 'accounts': 'Trading Accounts', 'positions': 'Open Positions',
+            'history': 'Trade History', 'analytics': 'Analytics', 'charts': 'Charts',
+            'admin-users': 'User Management', 'admin-telegram': 'Telegram Bot', 'admin-system': 'System Info'
+        };
+
+        const titleEl = document.getElementById('page-title');
+        if (titleEl) titleEl.textContent = titles[page] || page;
+
+        const content = document.getElementById('page-content');
+        if (!content) return;
+
+        // Show loading
+        content.innerHTML = '<div style="padding:40px"><div class="skeleton skeleton-card w-full" style="height:200px"></div></div>';
+
+        // Render page
+        switch(page) {
+            case 'dashboard': loadAndRenderDashboard(); break;
+            case 'accounts': loadAndRenderAccounts(); break;
+            case 'positions': loadAndRenderPositions(); break;
+            case 'history': loadAndRenderHistory(); break;
+            case 'analytics': loadAndRenderAnalytics(); break;
+            case 'charts': renderChartsPage(); break;
+            case 'admin-users': loadAndRenderAdminUsers(); break;
+            case 'admin-telegram': loadAndRenderTelegram(); break;
+            case 'admin-system': loadAndRenderSystem(); break;
+        }
+
+        // Close mobile sidebar
+        document.getElementById('sidebar')?.classList.remove('open');
+    }
+
+    function refreshCurrentPage() { navigateTo(State.currentPage); }
+
+    // ─── Dashboard Page ──────────────────────────────────────
+    async function loadDashboardData() {
+        try {
+            const [accountsData, overview] = await Promise.all([
+                API.getAccounts(),
+                API.getOverview()
+            ]);
+            State.accounts = accountsData?.accounts || [];
+            State.overview = overview;
+        } catch(e) { console.error('Load dashboard error', e); }
+    }
+
+    async function loadAndRenderDashboard() {
+        await loadDashboardData();
+        const content = document.getElementById('page-content');
+        const ov = State.overview;
+        const totals = ov?.totals || {};
+        const accounts = ov?.accounts || [];
+
+        const floatTotal = accounts.reduce((s, a) => s + (a.floating_pnl || 0), 0);
+
+        content.innerHTML = `
+        <div class="animate-in">
+            <!-- Summary Stats -->
+            <div class="stats-grid">
+                <div class="stat-card blue">
+                    <div class="stat-card-top">
+                        <span class="stat-label">Total Balance</span>
+                        <div class="stat-icon"><i class="fas fa-coins"></i></div>
+                    </div>
+                    <div class="stat-value">${formatCurrency(totals.balance)}</div>
+                </div>
+                <div class="stat-card cyan">
+                    <div class="stat-card-top">
+                        <span class="stat-label">Total Equity</span>
+                        <div class="stat-icon"><i class="fas fa-chart-area"></i></div>
+                    </div>
+                    <div class="stat-value">${formatCurrency(totals.equity)}</div>
+                </div>
+                <div class="stat-card ${totals.profit >= 0 ? 'green' : 'red'}">
+                    <div class="stat-card-top">
+                        <span class="stat-label">Total Profit</span>
+                        <div class="stat-icon"><i class="fas fa-dollar-sign"></i></div>
+                    </div>
+                    <div class="stat-value ${totals.profit >= 0 ? 'positive' : 'negative'}">${formatCurrency(totals.profit)}</div>
+                </div>
+                <div class="stat-card ${floatTotal >= 0 ? 'green' : 'red'}">
+                    <div class="stat-card-top">
+                        <span class="stat-label">Floating P/L</span>
+                        <div class="stat-icon"><i class="fas fa-wave-square"></i></div>
+                    </div>
+                    <div class="stat-value ${floatTotal >= 0 ? 'positive' : 'negative'}">${formatCurrency(floatTotal)}</div>
+                </div>
+                <div class="stat-card purple">
+                    <div class="stat-card-top">
+                        <span class="stat-label">Accounts</span>
+                        <div class="stat-icon"><i class="fas fa-layer-group"></i></div>
+                    </div>
+                    <div class="stat-value">${totals.account_count || 0}</div>
+                </div>
+                <div class="stat-card gold">
+                    <div class="stat-card-top">
+                        <span class="stat-label">Connected</span>
+                        <div class="stat-icon"><i class="fas fa-link"></i></div>
+                    </div>
+                    <div class="stat-value">${accounts.filter(a => a.is_connected).length}</div>
+                </div>
+            </div>
+
+            <!-- Accounts Overview -->
+            <div class="card mb-24">
+                <div class="card-header">
+                    <h3 class="card-title"><i class="fas fa-chart-pie"></i> Account Performance</h3>
+                    <button class="btn btn-sm btn-primary" onclick="showAddAccountModal()"><i class="fas fa-plus"></i> Add Account</button>
+                </div>
+                ${accounts.length === 0 ? `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📊</div>
+                        <div class="empty-state-title">No Accounts Yet</div>
+                        <div class="empty-state-text">Add your first MetaTrader account to start monitoring.</div>
+                        <button class="btn btn-primary" onclick="showAddAccountModal()"><i class="fas fa-plus"></i> Add Account</button>
+                    </div>
+                ` : `
+                    <div class="account-cards">
+                        ${accounts.map(acc => `
+                            <div class="account-card" onclick="selectAccount(${acc.id})">
+                                <div class="account-card-header">
+                                    <span class="account-card-name">${acc.nickname || acc.login}</span>
+                                    <span class="badge ${acc.is_connected ? 'badge-connected' : 'badge-disconnected'}">
+                                        ${acc.is_connected ? '● Connected' : '○ Offline'}
+                                    </span>
+                                </div>
+                                <div class="account-card-details">
+                                    <div class="account-detail-item">
+                                        <span class="account-detail-label">Balance</span>
+                                        <span class="account-detail-value">${formatCurrency(acc.balance)}</span>
+                                    </div>
+                                    <div class="account-detail-item">
+                                        <span class="account-detail-label">Equity</span>
+                                        <span class="account-detail-value">${formatCurrency(acc.equity)}</span>
+                                    </div>
+                                    <div class="account-detail-item">
+                                        <span class="account-detail-label">Profit</span>
+                                        <span class="account-detail-value ${profitClass(acc.total_profit)}">${formatCurrency(acc.total_profit)}</span>
+                                    </div>
+                                    <div class="account-detail-item">
+                                        <span class="account-detail-label">Win Rate</span>
+                                        <span class="account-detail-value">${formatPct(acc.win_rate)}</span>
+                                    </div>
+                                    <div class="account-detail-item">
+                                        <span class="account-detail-label">Drawdown</span>
+                                        <span class="account-detail-value profit-negative">${formatPct(acc.drawdown_pct)}</span>
+                                    </div>
+                                    <div class="account-detail-item">
+                                        <span class="account-detail-label">Trades</span>
+                                        <span class="account-detail-value">${acc.total_trades}</span>
+                                    </div>
+                                </div>
+                                <div class="mt-12">
+                                    <span class="text-muted text-sm">${acc.platform} | ${acc.server}</span>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `}
+            </div>
+
+            <!-- Charts Row -->
+            ${accounts.length > 0 ? `
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title"><i class="fas fa-chart-line"></i> Balance Distribution</h3></div>
+                    <div class="chart-container" style="height:300px"><canvas id="balance-chart"></canvas></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title"><i class="fas fa-chart-bar"></i> Win Rate Comparison</h3></div>
+                    <div class="chart-container" style="height:300px"><canvas id="winrate-chart"></canvas></div>
+                </div>
+            </div>
+            ` : ''}
+        </div>`;
+
+        // Render charts
+        if (accounts.length > 0) {
+            setTimeout(() => {
+                renderBalanceChart(accounts);
+                renderWinRateChart(accounts);
+            }, 100);
+        }
+    }
+
+    function renderBalanceChart(accounts) {
+        const ctx = document.getElementById('balance-chart');
+        if (!ctx) return;
+        if (State.charts.balance) State.charts.balance.destroy();
+
+        const colors = ['#6366f1','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#ec4899'];
+
+        State.charts.balance = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: accounts.map(a => a.nickname || String(a.login)),
+                datasets: [{
+                    data: accounts.map(a => a.balance || 0),
+                    backgroundColor: colors.slice(0, accounts.length),
+                    borderWidth: 0,
+                    hoverOffset: 8
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'right', labels: { color: '#94a3b8', font: { size: 11 }, padding: 12 } }
+                },
+                cutout: '65%'
+            }
+        });
+    }
+
+    function renderWinRateChart(accounts) {
+        const ctx = document.getElementById('winrate-chart');
+        if (!ctx) return;
+        if (State.charts.winrate) State.charts.winrate.destroy();
+
+        State.charts.winrate = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: accounts.map(a => a.nickname || String(a.login)),
+                datasets: [{
+                    label: 'Win Rate %',
+                    data: accounts.map(a => a.win_rate || 0),
+                    backgroundColor: accounts.map(a => (a.win_rate || 0) >= 50 ? 'rgba(16,185,129,0.6)' : 'rgba(239,68,68,0.6)'),
+                    borderRadius: 6, barThickness: 30
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    y: { beginAtZero: true, max: 100, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b' } },
+                    x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
+                },
+                plugins: { legend: { display: false } }
+            }
+        });
+    }
+
+    // ─── Select Account ──────────────────────────────────────
+    async function selectAccount(id) {
+        try {
+            const data = await API.getAccount(id);
+            State.selectedAccount = data;
+            navigateTo('positions');
+        } catch(e) { showToast('Failed to load account', 'error'); }
+    }
+
+    // ─── Accounts Page ──────────────────────────────────────
+    async function loadAndRenderAccounts() {
+        try {
+            const data = await API.getAccounts();
+            State.accounts = data?.accounts || [];
+        } catch(e) {}
+
+        const content = document.getElementById('page-content');
+        content.innerHTML = `
+        <div class="animate-in">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title"><i class="fas fa-wallet"></i> Trading Accounts</h3>
+                    <button class="btn btn-sm btn-primary" onclick="showAddAccountModal()"><i class="fas fa-plus"></i> Add Account</button>
+                </div>
+                ${State.accounts.length === 0 ? `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">💼</div>
+                        <div class="empty-state-title">No Trading Accounts</div>
+                        <div class="empty-state-text">Connect your MetaTrader account to start monitoring real trading data.</div>
+                        <button class="btn btn-primary" onclick="showAddAccountModal()"><i class="fas fa-plus"></i> Add Account</button>
+                    </div>
+                ` : `
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead><tr>
+                                <th>Account</th><th>Platform</th><th>Server</th><th>Balance</th>
+                                <th>Equity</th><th>Float P/L</th><th>Drawdown</th><th>Status</th><th>Actions</th>
+                            </tr></thead>
+                            <tbody>
+                                ${State.accounts.map(acc => {
+                                    const snap = acc.latest_snapshot;
+                                    return `<tr>
+                                        <td><strong style="color:var(--text-primary)">${acc.nickname || acc.login}</strong><br><span class="text-muted">#${acc.login}</span></td>
+                                        <td><span class="badge badge-plan">${acc.platform}</span></td>
+                                        <td>${acc.server}</td>
+                                        <td>${snap ? formatCurrency(snap.balance) : '—'}</td>
+                                        <td>${snap ? formatCurrency(snap.equity) : '—'}</td>
+                                        <td class="${snap ? profitClass(snap.floating_pnl) : ''}">${snap ? formatCurrency(snap.floating_pnl) : '—'}</td>
+                                        <td>${snap ? formatPct(snap.drawdown_pct) : '—'}</td>
+                                        <td><span class="badge ${acc.is_connected ? 'badge-connected' : 'badge-disconnected'}">${acc.is_connected ? 'Connected' : 'Offline'}</span></td>
+                                        <td class="flex gap-8">
+                                            <button class="btn btn-sm btn-outline" onclick="selectAccount(${acc.id})" title="View"><i class="fas fa-eye"></i></button>
+                                            <button class="btn btn-sm btn-outline" onclick="reconnectAccount(${acc.id})" title="Reconnect"><i class="fas fa-plug"></i></button>
+                                            <button class="btn btn-sm btn-danger" onclick="deleteAccount(${acc.id})" title="Delete"><i class="fas fa-trash"></i></button>
+                                        </td>
+                                    </tr>`;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `}
+            </div>
+        </div>`;
+    }
+
+    async function reconnectAccount(id) {
+        try {
+            const res = await API.reconnect(id);
+            showToast(res.message, res.success ? 'success' : 'warning');
+            loadAndRenderAccounts();
+        } catch(e) {}
+    }
+
+    async function deleteAccount(id) {
+        if (!confirm('Delete this account? All data will be removed.')) return;
+        try {
+            await API.deleteAccount(id);
+            showToast('Account deleted', 'success');
+            loadAndRenderAccounts();
+        } catch(e) {}
+    }
+
+    // ─── Add Account Modal ───────────────────────────────────
+    function showAddAccountModal() {
+        const modal = document.createElement('div');
+        modal.className = 'modal-overlay';
+        modal.id = 'modal-add-account';
+        modal.innerHTML = `
+        <div class="modal">
+            <h3 class="modal-title"><i class="fas fa-plus-circle" style="color:var(--accent-blue)"></i> Add Trading Account</h3>
+            <div class="form-group">
+                <label>Platform</label>
+                <select class="form-select" id="acc-platform">
+                    <option value="MT5">MetaTrader 5 (MT5)</option>
+                    <option value="MT4">MetaTrader 4 (MT4)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Account Login</label>
+                <input type="number" class="form-input" id="acc-login" placeholder="e.g. 12345678">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" class="form-input" id="acc-password" placeholder="Trading password">
+            </div>
+            <div class="form-group">
+                <label>Server</label>
+                <input type="text" class="form-input" id="acc-server" placeholder="e.g. MetaQuotes-Demo">
+            </div>
+            <div class="form-group">
+                <label>Nickname (Optional)</label>
+                <input type="text" class="form-input" id="acc-nickname" placeholder="e.g. Main Account">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" onclick="closeModal('modal-add-account')">Cancel</button>
+                <button class="btn btn-primary" onclick="handleAddAccount()"><i class="fas fa-plug"></i> Connect</button>
+            </div>
+        </div>`;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e) => { if (e.target === modal) closeModal('modal-add-account'); });
+    }
+
+    async function handleAddAccount() {
+        const platform = document.getElementById('acc-platform').value;
+        const login = parseInt(document.getElementById('acc-login').value);
+        const password = document.getElementById('acc-password').value;
+        const server = document.getElementById('acc-server').value.trim();
+        const nickname = document.getElementById('acc-nickname').value.trim();
+
+        if (!login || !password || !server) return showToast('Fill all required fields', 'warning');
+
+        try {
+            const res = await API.addAccount({ platform, login, password, server, nickname });
+            showToast(res.message, 'success');
+            closeModal('modal-add-account');
+            loadDashboardData();
+            if (State.currentPage === 'accounts') loadAndRenderAccounts();
+            else if (State.currentPage === 'dashboard') loadAndRenderDashboard();
+        } catch(e) {}
+    }
+
+    function closeModal(id) {
+        const el = document.getElementById(id);
+        if (el) el.remove();
+    }
+
+    // ─── Open Positions Page ─────────────────────────────────
+    async function loadAndRenderPositions() {
+        const content = document.getElementById('page-content');
+
+        // If no selected account, show account picker
+        if (!State.selectedAccount && State.accounts.length > 0) {
+            const data = await API.getAccounts();
+            State.accounts = data?.accounts || [];
+        }
+
+        if (State.accounts.length === 0) {
+            content.innerHTML = '<div class="empty-state animate-in"><div class="empty-state-icon">📈</div><div class="empty-state-title">No Accounts</div><div class="empty-state-text">Add a trading account first.</div></div>';
+            return;
+        }
+
+        const accId = State.selectedAccount?.id || State.accounts[0]?.id;
+        if (!accId) return;
+
+        try {
+            const [accDetail, posData] = await Promise.all([
+                API.getAccount(accId),
+                API.getPositions(accId)
+            ]);
+            State.selectedAccount = accDetail;
+            State.positions = posData?.positions || [];
+        } catch(e) {
+            State.positions = [];
+        }
+
+        const info = State.selectedAccount?.live_info || State.selectedAccount?.latest_snapshot || {};
+
+        content.innerHTML = `
+        <div class="animate-in">
+            <!-- Account Selector -->
+            <div class="flex items-center gap-12 mb-20">
+                <select class="form-select" style="max-width:300px" onchange="switchAccountPositions(this.value)">
+                    ${State.accounts.map(a => `<option value="${a.id}" ${a.id === accId ? 'selected' : ''}>${a.nickname || a.login} (${a.platform})</option>`).join('')}
+                </select>
+            </div>
+
+            <!-- Account Info Cards -->
+            <div class="stats-grid">
+                <div class="stat-card blue"><div class="stat-card-top"><span class="stat-label">Balance</span><div class="stat-icon"><i class="fas fa-coins"></i></div></div>
+                    <div class="stat-value" id="live-balance">${formatCurrency(info.balance)}</div></div>
+                <div class="stat-card cyan"><div class="stat-card-top"><span class="stat-label">Equity</span><div class="stat-icon"><i class="fas fa-chart-area"></i></div></div>
+                    <div class="stat-value" id="live-equity">${formatCurrency(info.equity)}</div></div>
+                <div class="stat-card gold"><div class="stat-card-top"><span class="stat-label">Margin</span><div class="stat-icon"><i class="fas fa-shield-alt"></i></div></div>
+                    <div class="stat-value" id="live-margin">${formatCurrency(info.margin)}</div></div>
+                <div class="stat-card purple"><div class="stat-card-top"><span class="stat-label">Free Margin</span><div class="stat-icon"><i class="fas fa-unlock"></i></div></div>
+                    <div class="stat-value" id="live-free-margin">${formatCurrency(info.free_margin)}</div></div>
+                <div class="stat-card ${(info.floating_pnl||0) >= 0 ? 'green' : 'red'}"><div class="stat-card-top"><span class="stat-label">Floating P/L</span><div class="stat-icon"><i class="fas fa-wave-square"></i></div></div>
+                    <div class="stat-value ${(info.floating_pnl||0) >= 0 ? 'positive' : 'negative'}" id="live-floating">${formatCurrency(info.floating_pnl)}</div></div>
+                <div class="stat-card blue"><div class="stat-card-top"><span class="stat-label">Leverage</span><div class="stat-icon"><i class="fas fa-balance-scale"></i></div></div>
+                    <div class="stat-value" id="live-leverage">1:${info.leverage || 0}</div></div>
+            </div>
+
+            <!-- Drawdown Bar -->
+            <div class="card mb-24">
+                <div class="flex items-center justify-between mb-12">
+                    <span class="stat-label">Drawdown</span>
+                    <span class="font-mono font-bold profit-negative" id="live-drawdown">${formatPct(info.drawdown_pct)}</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-bar-fill red" style="width:${Math.min(info.drawdown_pct || 0, 100)}%"></div>
+                </div>
+            </div>
+
+            <!-- Positions Table -->
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title"><i class="fas fa-exchange-alt"></i> Open Positions (${State.positions.length})</h3>
+                </div>
+                ${State.positions.length === 0 ? `
+                    <div class="empty-state" style="padding:40px">
+                        <div class="empty-state-icon">📭</div>
+                        <div class="empty-state-title">No Open Positions</div>
+                        <div class="empty-state-text">No active trades on this account.</div>
+                    </div>
+                ` : `
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead><tr>
+                                <th>Ticket</th><th>Symbol</th><th>Type</th><th>Lots</th>
+                                <th>Entry</th><th>Current</th><th>P/L</th>
+                                <th>SL</th><th>TP</th><th>Open Time</th>
+                            </tr></thead>
+                            <tbody id="positions-table-body">${renderPositionsRows(State.positions)}</tbody>
+                        </table>
+                    </div>
+                `}
+            </div>
+        </div>`;
+    }
+
+    function renderPositionsRows(positions) {
+        return positions.map(p => `
+            <tr>
+                <td>${p.ticket}</td>
+                <td><strong>${p.symbol}</strong></td>
+                <td><span class="badge ${p.trade_type === 'BUY' ? 'badge-buy' : 'badge-sell'}">${p.trade_type}</span></td>
+                <td>${p.lot_size}</td>
+                <td>${p.entry_price}</td>
+                <td>${p.current_price}</td>
+                <td class="${profitClass(p.profit)}">${profitIcon(p.profit)} ${formatCurrency(p.profit)}</td>
+                <td>${p.stop_loss || '—'}</td>
+                <td>${p.take_profit || '—'}</td>
+                <td>${formatTime(p.open_time)}</td>
+            </tr>
+        `).join('');
+    }
+
+    async function switchAccountPositions(id) {
+        try {
+            State.selectedAccount = await API.getAccount(parseInt(id));
+            loadAndRenderPositions();
+        } catch(e) {}
+    }
+
+    // ─── Trade History Page ──────────────────────────────────
+    async function loadAndRenderHistory() {
+        const content = document.getElementById('page-content');
+
+        if (State.accounts.length === 0) {
+            const data = await API.getAccounts();
+            State.accounts = data?.accounts || [];
+        }
+
+        if (State.accounts.length === 0) {
+            content.innerHTML = '<div class="empty-state animate-in"><div class="empty-state-icon">📜</div><div class="empty-state-title">No Accounts</div></div>';
+            return;
+        }
+
+        const accId = State.selectedAccount?.id || State.accounts[0]?.id;
+
+        try {
+            const data = await API.getHistory(accId, 365);
+            State.history = data?.history || [];
+        } catch(e) { State.history = []; }
+
+        content.innerHTML = `
+        <div class="animate-in">
+            <div class="flex items-center gap-12 mb-20">
+                <select class="form-select" style="max-width:300px" onchange="switchAccountHistory(this.value)">
+                    ${State.accounts.map(a => `<option value="${a.id}" ${a.id === accId ? 'selected' : ''}>${a.nickname || a.login}</option>`).join('')}
+                </select>
+                <span class="text-muted text-sm">${State.history.length} trades</span>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title"><i class="fas fa-history"></i> Trade History</h3>
+                </div>
+                ${State.history.length === 0 ? `
+                    <div class="empty-state" style="padding:40px">
+                        <div class="empty-state-icon">📭</div>
+                        <div class="empty-state-title">No Trade History</div>
+                    </div>
+                ` : `
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead><tr>
+                                <th>Ticket</th><th>Symbol</th><th>Type</th><th>Lots</th>
+                                <th>Entry</th><th>Exit</th><th>Profit</th>
+                                <th>Duration</th><th>Closed</th>
+                            </tr></thead>
+                            <tbody>
+                                ${State.history.map(t => `
+                                    <tr>
+                                        <td>${t.ticket}</td>
+                                        <td><strong>${t.symbol}</strong></td>
+                                        <td><span class="badge ${t.trade_type === 'BUY' ? 'badge-buy' : 'badge-sell'}">${t.trade_type}</span></td>
+                                        <td>${t.lot_size}</td>
+                                        <td>${t.entry_price}</td>
+                                        <td>${t.exit_price || '—'}</td>
+                                        <td class="${profitClass(t.profit)}">${profitIcon(t.profit)} ${formatCurrency(t.profit)}</td>
+                                        <td>${formatDuration(t.duration_seconds)}</td>
+                                        <td>${formatTime(t.close_time)}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `}
+            </div>
+        </div>`;
+    }
+
+    async function switchAccountHistory(id) {
+        State.selectedAccount = { id: parseInt(id) };
+        loadAndRenderHistory();
+    }
+
+    // ─── Analytics Page ──────────────────────────────────────
+    async function loadAndRenderAnalytics() {
+        const content = document.getElementById('page-content');
+
+        if (State.accounts.length === 0) {
+            const data = await API.getAccounts();
+            State.accounts = data?.accounts || [];
+        }
+
+        if (State.accounts.length === 0) {
+            content.innerHTML = '<div class="empty-state animate-in"><div class="empty-state-icon">📊</div><div class="empty-state-title">No Accounts</div></div>';
+            return;
+        }
+
+        const accId = State.selectedAccount?.id || State.accounts[0]?.id;
+
+        try {
+            State.analytics = await API.getAnalytics(accId);
+        } catch(e) { State.analytics = {}; }
+
+        const stats = State.analytics || {};
+
+        content.innerHTML = `
+        <div class="animate-in">
+            <div class="flex items-center gap-12 mb-20">
+                <select class="form-select" style="max-width:300px" onchange="switchAccountAnalytics(this.value)">
+                    ${State.accounts.map(a => `<option value="${a.id}" ${a.id === accId ? 'selected' : ''}>${a.nickname || a.login}</option>`).join('')}
+                </select>
+            </div>
+
+            <!-- Key Stats -->
+            <div class="stats-grid">
+                <div class="stat-card blue"><div class="stat-card-top"><span class="stat-label">Total Trades</span><div class="stat-icon"><i class="fas fa-hashtag"></i></div></div>
+                    <div class="stat-value">${stats.total_trades || 0}</div></div>
+                <div class="stat-card ${(stats.total_profit||0)>=0?'green':'red'}"><div class="stat-card-top"><span class="stat-label">Total Profit</span><div class="stat-icon"><i class="fas fa-dollar-sign"></i></div></div>
+                    <div class="stat-value ${(stats.total_profit||0)>=0?'positive':'negative'}">${formatCurrency(stats.total_profit)}</div></div>
+                <div class="stat-card ${(stats.win_rate||0)>=50?'green':'red'}"><div class="stat-card-top"><span class="stat-label">Win Rate</span><div class="stat-icon"><i class="fas fa-bullseye"></i></div></div>
+                    <div class="stat-value">${formatPct(stats.win_rate)}</div></div>
+                <div class="stat-card gold"><div class="stat-card-top"><span class="stat-label">Profit Factor</span><div class="stat-icon"><i class="fas fa-balance-scale"></i></div></div>
+                    <div class="stat-value">${stats.profit_factor || 0}</div></div>
+                <div class="stat-card purple"><div class="stat-card-top"><span class="stat-label">Risk/Reward</span><div class="stat-icon"><i class="fas fa-arrows-alt-v"></i></div></div>
+                    <div class="stat-value">${stats.risk_reward_ratio || 0}</div></div>
+                <div class="stat-card red"><div class="stat-card-top"><span class="stat-label">Max Drawdown</span><div class="stat-icon"><i class="fas fa-arrow-down"></i></div></div>
+                    <div class="stat-value negative">${formatCurrency(stats.max_drawdown)}</div></div>
+            </div>
+
+            <!-- Win/Loss Stats -->
+            <div class="grid-3 mb-24">
+                <div class="card">
+                    <h4 class="card-title mb-12"><i class="fas fa-trophy" style="color:var(--accent-green)"></i> Wins</h4>
+                    <div class="stat-value positive" style="font-size:2rem">${stats.win_count || 0}</div>
+                    <div class="text-muted text-sm mt-12">Avg Win: ${formatCurrency(stats.avg_win)}</div>
+                    <div class="text-muted text-sm">Largest: ${formatCurrency(stats.largest_win)}</div>
+                    <div class="text-muted text-sm">Consecutive: ${stats.consecutive_wins || 0}</div>
+                </div>
+                <div class="card">
+                    <h4 class="card-title mb-12"><i class="fas fa-times-circle" style="color:var(--accent-red)"></i> Losses</h4>
+                    <div class="stat-value negative" style="font-size:2rem">${stats.loss_count || 0}</div>
+                    <div class="text-muted text-sm mt-12">Avg Loss: ${formatCurrency(stats.avg_loss)}</div>
+                    <div class="text-muted text-sm">Largest: ${formatCurrency(stats.largest_loss)}</div>
+                    <div class="text-muted text-sm">Consecutive: ${stats.consecutive_losses || 0}</div>
+                </div>
+                <div class="card">
+                    <h4 class="card-title mb-12"><i class="fas fa-clock" style="color:var(--accent-cyan)"></i> Duration</h4>
+                    <div class="stat-value" style="font-size:1.5rem">${stats.avg_trade_duration_human || '—'}</div>
+                    <div class="text-muted text-sm mt-12">Average per trade</div>
+                    <div class="text-muted text-sm">Breakeven: ${stats.breakeven_count || 0}</div>
+                </div>
+            </div>
+
+            <!-- Charts -->
+            <div class="grid-2 mb-24">
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title"><i class="fas fa-chart-line"></i> Equity Curve</h3></div>
+                    <div class="chart-container" style="height:300px"><canvas id="equity-curve-chart"></canvas></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title"><i class="fas fa-chart-bar"></i> Daily Profit</h3></div>
+                    <div class="chart-container" style="height:300px"><canvas id="daily-profit-chart"></canvas></div>
+                </div>
+            </div>
+
+            <div class="card mb-24">
+                <div class="card-header"><h3 class="card-title"><i class="fas fa-calendar-alt"></i> Monthly Performance</h3></div>
+                <div class="chart-container" style="height:300px"><canvas id="monthly-chart"></canvas></div>
+            </div>
+        </div>`;
+
+        setTimeout(() => {
+            renderEquityCurve(stats);
+            renderDailyProfitChart(stats);
+            renderMonthlyChart(stats);
+        }, 100);
+    }
+
+    function renderEquityCurve(stats) {
+        const ctx = document.getElementById('equity-curve-chart');
+        if (!ctx) return;
+        if (State.charts.equity) State.charts.equity.destroy();
+
+        const curve = stats.equity_curve || [];
+        State.charts.equity = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: curve.map(c => c.trade),
+                datasets: [{
+                    label: 'Equity',
+                    data: curve.map(c => c.equity),
+                    borderColor: '#6366f1',
+                    backgroundColor: 'rgba(99,102,241,0.1)',
+                    fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b' } },
+                    x: { grid: { display: false }, ticks: { color: '#64748b', maxTicksLimit: 10 } }
+                },
+                plugins: { legend: { display: false } },
+                interaction: { intersect: false, mode: 'index' }
+            }
+        });
+    }
+
+    function renderDailyProfitChart(stats) {
+        const ctx = document.getElementById('daily-profit-chart');
+        if (!ctx) return;
+        if (State.charts.daily) State.charts.daily.destroy();
+
+        const daily = stats.daily_profits || {};
+        const labels = Object.keys(daily).sort().slice(-30);
+        const values = labels.map(d => daily[d]);
+
+        State.charts.daily = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels.map(d => d.slice(5)),
+                datasets: [{
+                    label: 'Daily P/L',
+                    data: values,
+                    backgroundColor: values.map(v => v >= 0 ? 'rgba(16,185,129,0.6)' : 'rgba(239,68,68,0.6)'),
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b' } },
+                    x: { grid: { display: false }, ticks: { color: '#64748b', maxRotation: 45 } }
+                },
+                plugins: { legend: { display: false } }
+            }
+        });
+    }
+
+    function renderMonthlyChart(stats) {
+        const ctx = document.getElementById('monthly-chart');
+        if (!ctx) return;
+        if (State.charts.monthly) State.charts.monthly.destroy();
+
+        const monthly = stats.monthly_profits || {};
+        const labels = Object.keys(monthly).sort();
+        const values = labels.map(m => monthly[m]);
+
+        State.charts.monthly = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'Monthly P/L',
+                    data: values,
+                    backgroundColor: values.map(v => v >= 0 ? 'rgba(16,185,129,0.7)' : 'rgba(239,68,68,0.7)'),
+                    borderRadius: 6, barThickness: 40
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b' } },
+                    x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
+                },
+                plugins: { legend: { display: false } }
+            }
+        });
+    }
+
+    async function switchAccountAnalytics(id) {
+        State.selectedAccount = { id: parseInt(id) };
+        loadAndRenderAnalytics();
+    }
+
+    // ─── Charts Page (TradingView style) ─────────────────────
+    function renderChartsPage() {
+        const content = document.getElementById('page-content');
+        content.innerHTML = `
+        <div class="animate-in">
+            <div class="card" style="padding:16px">
+                <div class="flex items-center gap-12 mb-16" style="flex-wrap:wrap">
+                    <input type="text" class="form-input" id="chart-symbol" value="EURUSD" placeholder="Symbol" style="max-width:160px">
+                    <div class="tabs" style="margin-bottom:0">
+                        <button class="tab active" onclick="changeTimeframe('M5',this)">M5</button>
+                        <button class="tab" onclick="changeTimeframe('M15',this)">M15</button>
+                        <button class="tab" onclick="changeTimeframe('M30',this)">M30</button>
+                        <button class="tab" onclick="changeTimeframe('H1',this)">H1</button>
+                        <button class="tab" onclick="changeTimeframe('H4',this)">H4</button>
+                        <button class="tab" onclick="changeTimeframe('D1',this)">D1</button>
+                        <button class="tab" onclick="changeTimeframe('W1',this)">W1</button>
+                    </div>
+                    <button class="btn btn-sm btn-primary" onclick="loadChartData()"><i class="fas fa-search"></i> Load</button>
+                </div>
+                <div class="chart-container" style="height:500px"><canvas id="price-chart"></canvas></div>
+            </div>
+        </div>`;
+
+        loadChartData();
+    }
+
+    let currentTimeframe = 'H1';
+
+    function changeTimeframe(tf, btn) {
+        currentTimeframe = tf;
+        document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+        loadChartData();
+    }
+
+    async function loadChartData() {
+        const symbol = document.getElementById('chart-symbol')?.value || 'EURUSD';
+        try {
+            const data = await API.getCandles(symbol, currentTimeframe, 500);
+            renderPriceChart(data.candles, symbol);
+        } catch(e) {
+            showToast('Failed to load chart data. MT5 may not be available.', 'warning');
+            renderEmptyPriceChart();
+        }
+    }
+
+    function renderPriceChart(candles, symbol) {
+        const ctx = document.getElementById('price-chart');
+        if (!ctx) return;
+        if (State.charts.price) State.charts.price.destroy();
+
+        if (!candles || candles.length === 0) {
+            renderEmptyPriceChart();
+            return;
+        }
+
+        const labels = candles.map(c => new Date(c.time * 1000));
+        const closes = candles.map(c => c.close);
+        const highs = candles.map(c => c.high);
+        const lows = candles.map(c => c.low);
+
+        State.charts.price = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: `${symbol} Close`,
+                        data: closes,
+                        borderColor: '#6366f1',
+                        backgroundColor: 'rgba(99,102,241,0.05)',
+                        fill: true, tension: 0.1, pointRadius: 0, borderWidth: 1.5
+                    },
+                    {
+                        label: 'High',
+                        data: highs,
+                        borderColor: 'rgba(16,185,129,0.3)',
+                        fill: false, pointRadius: 0, borderWidth: 1, borderDash: [2,2]
+                    },
+                    {
+                        label: 'Low',
+                        data: lows,
+                        borderColor: 'rgba(239,68,68,0.3)',
+                        fill: false, pointRadius: 0, borderWidth: 1, borderDash: [2,2]
+                    }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        grid: { color: 'rgba(255,255,255,0.03)' },
+                        ticks: { color: '#64748b', maxTicksLimit: 12 }
+                    },
+                    y: {
+                        grid: { color: 'rgba(255,255,255,0.04)' },
+                        ticks: { color: '#64748b' },
+                        position: 'right'
+                    }
+                },
+                plugins: {
+                    legend: { display: true, labels: { color: '#94a3b8', font: { size: 11 } } },
+                    tooltip: { mode: 'index', intersect: false }
+                },
+                interaction: { intersect: false, mode: 'index' }
+            }
+        });
+    }
+
+    function renderEmptyPriceChart() {
+        const ctx = document.getElementById('price-chart');
+        if (!ctx) return;
+        if (State.charts.price) State.charts.price.destroy();
+
+        State.charts.price = new Chart(ctx, {
+            type: 'line',
+            data: { labels: ['No Data'], datasets: [{ data: [0], borderColor: '#333', pointRadius: 0 }] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b' } },
+                    x: { grid: { display: false }, ticks: { color: '#64748b' } }
+                }
+            }
+        });
+    }
+
+    // ─── Admin: Users Page ───────────────────────────────────
+    async function loadAndRenderAdminUsers() {
+        const content = document.getElementById('page-content');
+        if (State.user?.role !== 'owner') {
+            content.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔒</div><div class="empty-state-title">Access Denied</div></div>';
+            return;
+        }
+
+        try { State.users = (await API.getUsers())?.users || []; } catch(e) { State.users = []; }
+
+        content.innerHTML = `
+        <div class="animate-in">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title"><i class="fas fa-users-cog"></i> User Management</h3>
+                    <span class="text-muted text-sm">${State.users.length} users</span>
+                </div>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead><tr><th>User</th><th>Role</th><th>Plan</th><th>Joined</th><th>Last Login</th><th>Actions</th></tr></thead>
+                        <tbody>
+                            ${State.users.map(u => `
+                                <tr>
+                                    <td><strong>${u.username}</strong></td>
+                                    <td><span class="badge ${u.role === 'owner' ? 'badge-owner' : 'badge-plan'}">${u.role}</span></td>
+                                    <td>
+                                        <select class="form-select" style="padding:6px 12px;font-size:0.8rem;min-width:80px" onchange="updateUserPlan('${u.username}', this.value)" ${u.role === 'owner' ? 'disabled' : ''}>
+                                            ${['free','basic','pro','owner'].map(p => `<option value="${p}" ${u.plan === p ? 'selected' : ''}>${p}</option>`).join('')}
+                                        </select>
+                                    </td>
+                                    <td>${formatTime(u.created_at)}</td>
+                                    <td>${u.last_login ? formatTime(u.last_login) : '—'}</td>
+                                    <td><span class="badge ${u.is_active ? 'badge-connected' : 'badge-disconnected'}">${u.is_active ? 'Active' : 'Disabled'}</span></td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    async function updateUserPlan(username, plan) {
+        try {
+            await API.updatePlan(username, plan);
+            showToast(`Plan updated to ${plan} for ${username}`, 'success');
+        } catch(e) {}
+    }
+
+    // ─── Admin: Telegram Page ────────────────────────────────
+    async function loadAndRenderTelegram() {
+        const content = document.getElementById('page-content');
+        if (State.user?.role !== 'owner') {
+            content.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔒</div><div class="empty-state-title">Access Denied</div></div>';
+            return;
+        }
+
+        try { State.telegramStatus = await API.getTelegramStatus(); } catch(e) { State.telegramStatus = {}; }
+
+        const ts = State.telegramStatus || {};
+
+        content.innerHTML = `
+        <div class="animate-in">
+            <div class="grid-2">
+                <div class="card">
+                    <h3 class="card-title mb-20"><i class="fab fa-telegram" style="color:#0088cc"></i> Telegram Bot Configuration</h3>
+                    <div class="form-group">
+                        <label>Bot Token</label>
+                        <input type="text" class="form-input" id="telegram-token" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+                    </div>
+                    <button class="btn btn-primary" onclick="configureTelegram()"><i class="fas fa-save"></i> Save & Start Bot</button>
+                </div>
+                <div class="card">
+                    <h3 class="card-title mb-20"><i class="fas fa-info-circle"></i> Bot Status</h3>
+                    <div class="flex flex-col gap-12">
+                        <div class="flex justify-between">
+                            <span class="text-muted">Configured</span>
+                            <span class="badge ${ts.configured ? 'badge-connected' : 'badge-disconnected'}">${ts.configured ? 'Yes' : 'No'}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-muted">Running</span>
+                            <span class="badge ${ts.is_running ? 'badge-connected' : 'badge-disconnected'}">${ts.is_running ? 'Yes' : 'No'}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-muted">Owner Chat ID</span>
+                            <span class="font-mono text-sm">${ts.owner_chat_id || 'Not registered'}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mt-24">
+                <h3 class="card-title mb-16"><i class="fas fa-terminal"></i> Available Commands</h3>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead><tr><th>Command</th><th>Description</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>/register_owner</code></td><td>Register your chat as the owner</td></tr>
+                            <tr><td><code>/status</code></td><td>Show system status</td></tr>
+                            <tr><td><code>/accounts</code></td><td>List all trading accounts</td></tr>
+                            <tr><td><code>/profit</code></td><td>Show profit summary</td></tr>
+                            <tr><td><code>/analytics</code></td><td>Send analytics summary</td></tr>
+                            <tr><td><code>/backup</code></td><td>Create and send database backup</td></tr>
+                            <tr><td><code>/users</code></td><td>List registered users</td></tr>
+                            <tr><td><code>/help</code></td><td>Show help</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    async function configureTelegram() {
+        const token = document.getElementById('telegram-token')?.value.trim();
+        if (!token) return showToast('Enter a bot token', 'warning');
+
+        try {
+            const res = await API.configureTelegram(token);
+            showToast(res.message, res.success ? 'success' : 'warning');
+            loadAndRenderTelegram();
+        } catch(e) {}
+    }
+
+    // ─── Admin: System Page ──────────────────────────────────
+    async function loadAndRenderSystem() {
+        const content = document.getElementById('page-content');
+        if (State.user?.role !== 'owner') {
+            content.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔒</div><div class="empty-state-title">Access Denied</div></div>';
+            return;
+        }
+
+        try { State.systemInfo = await API.getSystemInfo(); } catch(e) { State.systemInfo = {}; }
+
+        const sys = State.systemInfo || {};
+
+        content.innerHTML = `
+        <div class="animate-in">
+            <div class="stats-grid">
+                <div class="stat-card blue"><div class="stat-card-top"><span class="stat-label">Users</span><div class="stat-icon"><i class="fas fa-users"></i></div></div>
+                    <div class="stat-value">${sys.users_count || 0}</div></div>
+                <div class="stat-card green"><div class="stat-card-top"><span class="stat-label">Accounts</span><div class="stat-icon"><i class="fas fa-wallet"></i></div></div>
+                    <div class="stat-value">${sys.accounts_count || 0}</div></div>
+                <div class="stat-card purple"><div class="stat-card-top"><span class="stat-label">Trades</span><div class="stat-icon"><i class="fas fa-exchange-alt"></i></div></div>
+                    <div class="stat-value">${sys.trades_count || 0}</div></div>
+                <div class="stat-card gold"><div class="stat-card-top"><span class="stat-label">Snapshots</span><div class="stat-icon"><i class="fas fa-camera"></i></div></div>
+                    <div class="stat-value">${sys.snapshots_count || 0}</div></div>
+            </div>
+
+            <div class="grid-2">
+                <div class="card">
+                    <h3 class="card-title mb-16"><i class="fas fa-server"></i> System Information</h3>
+                    <div class="flex flex-col gap-12">
+                        ${[
+                            ['Platform', sys.platform],
+                            ['Version', sys.version],
+                            ['MT5 Available', sys.mt5_available ? '✅ Yes' : '❌ No'],
+                            ['Telegram Bot', sys.telegram_running ? '✅ Running' : '⏸️ Stopped'],
+                            ['Database Size', `${sys.database_size_mb || 0} MB`],
+                            ['Server Time', sys.server_time ? formatTime(sys.server_time) : '—'],
+                            ['Python', sys.python_version?.split(' ')[0] || '—'],
+                            ['Status', sys.uptime || '—']
+                        ].map(([k,v]) => `
+                            <div class="flex justify-between items-center" style="padding:8px 0;border-bottom:1px solid var(--border-color)">
+                                <span class="text-muted">${k}</span>
+                                <span class="font-mono text-sm">${v}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                <div class="card">
+                    <h3 class="card-title mb-16"><i class="fas fa-tools"></i> Quick Actions</h3>
+                    <div class="flex flex-col gap-12">
+                        <button class="btn btn-primary btn-full" onclick="downloadBackup()"><i class="fas fa-download"></i> Download Backup</button>
+                        <button class="btn btn-outline btn-full" onclick="refreshCurrentPage()"><i class="fas fa-sync"></i> Refresh System Info</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    async function downloadBackup() {
+        try {
+            const res = await fetch('/api/admin/backup', {
+                headers: { 'Authorization': `Bearer ${State.token}` }
+            });
+            if (!res.ok) throw new Error('Backup failed');
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `putradev_backup_${new Date().toISOString().slice(0,10)}.db`;
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast('Backup downloaded!', 'success');
+        } catch(e) {
+            showToast('Backup failed: ' + e.message, 'error');
+        }
+    }
+
+    // ─── Auto-refresh ────────────────────────────────────────
+    function startAutoRefresh() {
+        if (State.refreshInterval) clearInterval(State.refreshInterval);
+        State.refreshInterval = setInterval(() => {
+            if (State.currentPage === 'positions' && State.selectedAccount) {
+                const accId = State.selectedAccount.id;
+                API.getPositions(accId).then(data => {
+                    if (data?.positions) updateLivePositions(data.positions);
+                }).catch(() => {});
+
+                API.getAccount(accId).then(data => {
+                    if (data?.live_info) updateLiveInfo(data.live_info);
+                }).catch(() => {});
+            }
+        }, 10000);
+    }
+
+    // ─── Initialize ──────────────────────────────────────────
+    async function init() {
+        const savedToken = localStorage.getItem('putradev_token');
+        if (savedToken) {
+            State.token = savedToken;
+            try {
+                const user = await API.me();
+                State.user = user;
+                connectWebSocket();
+                renderApp();
+                loadDashboardData().then(() => {
+                    if (State.currentPage === 'dashboard') loadAndRenderDashboard();
+                });
+                startAutoRefresh();
+            } catch(e) {
+                State.token = null;
+                localStorage.removeItem('putradev_token');
+                renderApp();
+            }
+        } else {
+            renderApp();
+        }
+    }
+
+    // Handle Enter key on login
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const loginInput = document.getElementById('login-password');
+            const regInput = document.getElementById('reg-password');
+            if (loginInput && document.activeElement === loginInput) handleLogin();
+            if (regInput && document.activeElement === regInput) handleRegister();
+        }
+    });
+
+    // Start application
+    init();
+    </script>
+</body>
+</html>
